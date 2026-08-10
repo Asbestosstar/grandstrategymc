@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "grandstrategy",
+  "version": "1.0.0",
+  "name": "Grand Strategy",
+  "description": "A grand strategy mod for Minecraft.",
+  "authors": [
+    "AsbestosStar"
+  ],
+  "contact": {
+    "homepage": "https://example.com/",
+    "sources": "https://github.com/example/grandstrategy"
+  },
+  "license": "Unlicense",
+  "icon": "assets/grandstrategy/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.asbestosstar.grandstrategy.fabric.GrandStrategyFabric"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.17.3",
+    "minecraft": "26.1.2",
+    "java": ">=21"
+  },
+  "mixins": [
+    "grandstrategy.mixins.json"
+  ]
+}
+
+
+

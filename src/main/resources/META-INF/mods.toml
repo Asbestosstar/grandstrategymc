@@ -1,0 +1,32 @@
+modLoader="javafml"
+loaderVersion="[50,)"
+license="Unlicense"
+
+[[mods]]
+modId="grandstrategy"
+version="1.0.0"
+displayName="Grand Strategy"
+authors="AsbestosStar"
+description='''
+A grand strategy mod for Minecraft.
+'''
+
+[[mixins]]
+config="grandstrategy.mixins.json"
+
+[[dependencies.grandstrategy]]
+    modId="forge"
+    mandatory=true
+    versionRange="[50,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.grandstrategy]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[26.1.2,)"
+    ordering="NONE"
+    side="BOTH"
+
+
+

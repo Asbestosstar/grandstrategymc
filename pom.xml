@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.asbestosstar</groupId>
+    <artifactId>grandstrategymc</artifactId>
+    <version>0.1-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>25</maven.compiler.source>
+        <maven.compiler.target>25</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <minecraft.version>26.1.2</minecraft.version>
+    </properties>
+
+
+
+
+    <repositories>
+        <repository>
+            <id>MCForge</id>
+            <name>MCForge</name>
+            <url>https://maven.minecraftforge.net/</url>
+        </repository>
+        <repository>
+            <id>Minecraft</id>
+            <name>Minecraft</name>
+            <url>https://libraries.minecraft.net</url>
+        </repository>
+        <repository>
+            <id>TLauncher</id>
+            <name>TLauncher</name>
+            <url>https://res.tlauncher.org</url>
+        </repository>
+        <repository>
+            <id>NeoForge</id>
+            <name>NeoForge</name>
+            <url>https://maven.neoforged.net/</url>
+        </repository>
+
+
+        <repository>
+            <id>FabricMC</id>
+            <name>FabricMC</name>
+            <url>https://maven.fabricmc.net/</url>
+        </repository>
+
+
+        <repository>
+            <id>jitpack</id>
+            <name>jitpack</name>
+            <url>https://jitpack.io/</url>
+        </repository>
+
+
+    </repositories>
+
+    <dependencies>
+
+        <!-- https://mvnrepository.com/artifact/net.minecraftforge/eventbus -->
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>eventbus</artifactId>
+            <version>6.2.6</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>5.14.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.14.0</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>modlauncher</artifactId>
+            <version>10.2.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>fmlcore</artifactId>
+            <version>1.20.6-50.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>javafmllanguage</artifactId>
+            <version>1.20.6-50.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>lowcodelanguage</artifactId>
+            <version>1.20.6-50.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>mclanguage</artifactId>
+            <version>1.20.6-50.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.minecraftforge</groupId>
+            <artifactId>fmlloader</artifactId>
+            <version>1.20.6-50.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/cpw.mods/securejarhandler -->
+        <dependency>
+            <groupId>cpw.mods</groupId>
+            <artifactId>securejarhandler</artifactId>
+            <version>1.0.1</version>
+            <scope>provided</scope>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/cpw.mods/securejarhandler -->
+        <dependency>
+            <groupId>cpw.mods</groupId>
+            <artifactId>modlauncher</artifactId>
+            <version>10.1.10</version>
+            <scope>provided</scope>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/net.fabricmc/fabric-loader -->
+        <dependency>
+            <groupId>net.fabricmc</groupId>
+            <artifactId>fabric-loader</artifactId>
+            <version>0.17.3</version>
+            <scope>provided</scope>
+        </dependency>
+
+
+        <dependency>
+            <groupId>net.neoforged.fancymodloader</groupId>
+            <artifactId>loader</artifactId>
+            <version>10.0.14</version>
+            <scope>provided</scope>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/net.fabricmc/sponge-mixin -->
+        <dependency>
+            <groupId>net.fabricmc</groupId>
+            <artifactId>sponge-mixin</artifactId>
+            <version>0.16.5+mixin.0.8.7</version>
+            <scope>provided</scope>
+        </dependency>
+
+
+
+        <dependency>
+            <groupId>net.minecraft</groupId>
+            <artifactId>minecraft</artifactId>
+            <version>${minecraft.version}</version>
+            <classifier>client</classifier>
+            <scope>provided</scope>
+        </dependency>
+
+
+
+        <dependency>
+            <groupId>com.mojang</groupId>
+            <artifactId>datafixerupper</artifactId>
+            <version>7.0.14</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- End of Do not include these in fat jar -->
+
+
+        <dependency>
+            <groupId>com.asbestosstar</groupId>
+            <artifactId>featurecreep-loader</artifactId>
+            <version>6.0.0-am3</version>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/cpw.mods/securejarhandler -->
+        <dependency>
+            <groupId>com.asbestosstar</groupId>
+            <artifactId>featurecreep-api</artifactId>
+            <version>7</version>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/cpw.mods/securejarhandler -->
+        <dependency>
+            <groupId>com.asbestosstar</groupId>
+            <artifactId>featurecreep-bootstrap</artifactId>
+            <version>7</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.asbestosstar</groupId>
+            <artifactId>comoraclestream-dax-stub</artifactId>
+            <version>0.0.1</version>
+        </dependency>
+
+
+
+
+    </dependencies>
+
+
+</project>
+
+
+
