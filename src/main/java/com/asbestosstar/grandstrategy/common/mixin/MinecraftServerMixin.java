@@ -13,17 +13,13 @@ import java.util.function.BooleanSupplier;
 @Mixin(MinecraftServer.class)
 public abstract class MinecraftServerMixin {
 
-    @Inject(method = "tickServer", at = @At("TAIL"))
-    private void grandstrategy$afterWorldTick(BooleanSupplier haveTime, CallbackInfo ci) {
-        WorldSessionManager.onServerTick((MinecraftServer) (Object) this);
-    }
+	@Inject(method = "tickServer", at = @At("TAIL"))
+	private void grandstrategy$afterWorldTick(BooleanSupplier haveTime, CallbackInfo ci) {
+		WorldSessionManager.onServerTick((MinecraftServer) (Object) this);
+	}
 
-    @Inject(method = "stopServer", at = @At("HEAD"))
-    private void grandstrategy$beforeServerStop(CallbackInfo ci) {
-        WorldSessionManager.onServerStopping((MinecraftServer) (Object) this);
-    }
+	@Inject(method = "stopServer", at = @At("HEAD"))
+	private void grandstrategy$beforeServerStop(CallbackInfo ci) {
+		WorldSessionManager.onServerStopping((MinecraftServer) (Object) this);
+	}
 }
-
-
-
-
