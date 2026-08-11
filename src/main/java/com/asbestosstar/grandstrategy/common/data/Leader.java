@@ -68,3 +68,4 @@ public class Leader {
         return "Leader{id='" + id + "', name='" + name + "', immortal=" + immortal + "}";
     }
 }
+

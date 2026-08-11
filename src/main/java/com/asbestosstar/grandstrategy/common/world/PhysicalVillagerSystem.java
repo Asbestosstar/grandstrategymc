@@ -5,6 +5,7 @@ import com.asbestosstar.grandstrategy.common.data.Civilisation;
 import com.asbestosstar.grandstrategy.common.data.DataManager;
 import com.asbestosstar.grandstrategy.common.data.FactoryRecipe;
 import com.asbestosstar.grandstrategy.common.data.FactoryType;
+import com.asbestosstar.grandstrategy.common.data.MinecraftItemRegistry;
 import com.asbestosstar.grandstrategy.common.data.ProductionOrder;
 import com.asbestosstar.grandstrategy.common.data.Providence;
 import com.asbestosstar.grandstrategy.common.data.ResourceType;
@@ -90,7 +91,7 @@ public final class PhysicalVillagerSystem {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private static final String STATE_FILE = "physical_villagers.json";
-    private static final int STATE_VERSION = 13;
+    private static final int STATE_VERSION = 14;
     private static final int WORKER_RECONCILE_TICKS = 20;
     private static final int DEPOT_RECONCILE_TICKS = 20;
     private static final int SAVE_INTERVAL_TICKS = 6_000;
@@ -250,6 +251,19 @@ public final class PhysicalVillagerSystem {
     private static final int STRATEGIC_ROUTE_MAX_SEGMENT = 224;
     private static final int STRATEGIC_ROUTE_CORRIDOR_MARGIN = 28;
     private static final int STRATEGIC_ROUTE_MAX_CELLS_PER_AXIS = 96;
+    // Capturing a route snapshot touches live chunks and heightmaps and therefore MUST
+    // happen on the Minecraft server thread. Bound that synchronous work per tick; the
+    // background planner can consume snapshots much faster than the main thread should
+    // be allowed to manufacture them during a 100+ worker route burst.
+    private static final int MAX_NAVIGATION_SNAPSHOT_CAPTURES_PER_TICK = 3;
+    private static final int MAX_ESCAPE_SNAPSHOT_CAPTURES_PER_TICK = 2;
+    // Above this population, Grand Strategy services ordinary worker AI in rotating
+    // cohorts. Vanilla PathNavigation/entity physics continue every Minecraft tick;
+    // only GS decision/inspection work is budgeted. This prevents O(population) heavy
+    // server-thread logic from consuming the full 50 ms tick budget.
+    private static final int FULL_RATE_WORKER_LIMIT = 96;
+    private static final int TARGET_WORKER_SERVICES_PER_TICK = 36;
+    private static final int MAX_WORKER_SERVICE_STRIDE = 8;
     private static final int ESCAPE_SNAPSHOT_RADIUS_XZ = 10;
     private static final int ESCAPE_SNAPSHOT_BELOW = 4;
     private static final int ESCAPE_SNAPSHOT_ABOVE = 10;
@@ -321,6 +335,17 @@ public final class PhysicalVillagerSystem {
     // save file or resurrecting obsolete requests after a restart.
     private final Map<String, TravelAssistRequest> travelAssistRequests = new LinkedHashMap<>();
 
+    // Runtime-only scratch/caches. They are rebuilt on the authoritative server thread
+    // and never enter the save file. The city index replaces hundreds of repeated full
+    // providence scans per tick, while the entity cache collapses repeated combat UUID
+    // lookups to at most one ServerLevel lookup per entity per tick.
+    private final List<WorkerRecord> workerTickScratch = new ArrayList<>();
+    private final Map<String, City> cityLookupCache = new HashMap<>();
+    private final Map<String, Entity> entityLookupCache = new HashMap<>();
+    private long cityLookupCacheTick = Long.MIN_VALUE;
+    private int navigationSnapshotsThisTick;
+    private int escapeSnapshotsThisTick;
+
     private Path worldRoot;
     private boolean running;
     private boolean dirty;
@@ -348,6 +373,12 @@ public final class PhysicalVillagerSystem {
         this.workDropClaims.clear();
         this.obstacleClaims.clear();
         this.travelAssistRequests.clear();
+        this.workerTickScratch.clear();
+        this.cityLookupCache.clear();
+        this.entityLookupCache.clear();
+        this.cityLookupCacheTick = Long.MIN_VALUE;
+        this.navigationSnapshotsThisTick = 0;
+        this.escapeSnapshotsThisTick = 0;
         CivilisationTrafficManager.getInstance().clear();
         WorkerPlannerService.getInstance().start();
         load();
@@ -368,6 +399,12 @@ public final class PhysicalVillagerSystem {
         workDropClaims.clear();
         obstacleClaims.clear();
         travelAssistRequests.clear();
+        workerTickScratch.clear();
+        cityLookupCache.clear();
+        entityLookupCache.clear();
+        cityLookupCacheTick = Long.MIN_VALUE;
+        navigationSnapshotsThisTick = 0;
+        escapeSnapshotsThisTick = 0;
         WorkerPlannerService.getInstance().stop();
         CivilisationTrafficManager.getInstance().clear();
     }
@@ -378,6 +415,9 @@ public final class PhysicalVillagerSystem {
         if (level == null) return;
 
         ticks++;
+        navigationSnapshotsThisTick = 0;
+        escapeSnapshotsThisTick = 0;
+        entityLookupCache.clear();
 
         if (ticks % DEPOT_RECONCILE_TICKS == 0) {
             ensureSupplyDepots(level);
@@ -389,11 +429,20 @@ public final class PhysicalVillagerSystem {
             synchroniseAllResourceLedgers(level);
         }
 
+        // Do not make every physical person execute the entire GS decision pipeline on
+        // every Minecraft tick. PathfinderMob navigation/physics still advance every
+        // tick in vanilla; these rotating cohorts only budget Grand Strategy's own
+        // inspections, block scans, liveness checks and profession decisions.
+        int serviceStride = workerServiceStride();
+        workerTickScratch.clear();
+        workerTickScratch.addAll(workers.values());
+
         // One malformed worker must never prevent the rest of the civilisation from
         // ticking. Earlier builds executed the loop as one failure domain, so a
         // repeatable RuntimeException in a single worker could make an entire job
         // progression appear frozen. Isolate each body and self-heal its transient AI.
-        for (WorkerRecord record : new ArrayList<>(workers.values())) {
+        for (WorkerRecord record : workerTickScratch) {
+            if (!shouldServiceWorker(record, serviceStride)) continue;
             try {
                 tickWorker(level, record);
                 record.consecutiveTickErrors = 0;
@@ -405,12 +454,55 @@ public final class PhysicalVillagerSystem {
         if (dirty && ticks % SAVE_INTERVAL_TICKS == 0) save();
     }
 
+    /** Number of rotating cohorts needed to keep ordinary GS worker service bounded. */
+    private int workerServiceStride() {
+        int population = workers.size();
+        if (population <= FULL_RATE_WORKER_LIMIT) return 1;
+        int stride = (population + TARGET_WORKER_SERVICES_PER_TICK - 1)
+                / TARGET_WORKER_SERVICES_PER_TICK;
+        return clampInt(stride, 2, MAX_WORKER_SERVICE_STRIDE);
+    }
+
+    private boolean shouldServiceWorker(WorkerRecord record, int stride) {
+        if (record == null) return false;
+        // These modes apply direct motion or recover a body and therefore remain
+        // genuinely real-time even when the ordinary population is cohort-scheduled.
+        if (record.mineTransitDirection != 0
+                || record.navigationAssistTicks > 0
+                || record.waterTicks > 0
+                || record.hasWaterEscapeTarget
+                || record.minerShaftRecoveryActive
+                || record.nonMinerMineAvoidanceActive
+                || record.needsNavigationRehydrate
+                || record.consecutiveTickErrors > 0
+                || "work_drop".equals(record.targetKind)) {
+            return true;
+        }
+        if (stride <= 1) return true;
+        // Army decisions already have their own four-tick stagger. At high population
+        // call soldiers exactly on that slot rather than combining two unrelated
+        // moduli (which would turn a 4-tick decision cadence into 12/20+ ticks).
+        if (parseJob(record.job) == VillagerJob.SOLDIER) {
+            return Math.floorMod((int) ticks, SOLDIER_DECISION_INTERVAL_TICKS)
+                    == Math.floorMod(record.assignmentIndex, SOLDIER_DECISION_INTERVAL_TICKS);
+        }
+        int salt = record.assignmentIndex * 31
+                + (record.civilisationId == null ? 0 : record.civilisationId.hashCode())
+                + (record.uuid == null ? 0 : record.uuid.hashCode());
+        return Math.floorMod((int) ticks, stride) == Math.floorMod(salt, stride);
+    }
+
     /**
      * Called after creating a player country so the first physical population does
      * not have to wait for the normal discovery/providence interval.
      */
     public synchronized void requestImmediateReconcile() {
         ticks = Math.max(ticks, WORKER_RECONCILE_TICKS - 1L);
+    }
+
+    /** Current physical population, used only for cheap throughput budgeting. */
+    public synchronized int workerCount() {
+        return workers.size();
     }
 
     /**
@@ -435,6 +527,22 @@ public final class PhysicalVillagerSystem {
                     describeWorkerStatus(record),
                     carriedTotal(record),
                     record.lastX, record.lastY, record.lastZ));
+        }
+        return List.copyOf(markers);
+    }
+
+    /**
+     * Minimal position-only snapshot used by world discovery. Unlike snapshotMapMarkers
+     * this does not build job/tool/status strings for every person once per second.
+     */
+    public synchronized List<VillagerDiscoveryMarker> snapshotDiscoveryMarkers() {
+        List<VillagerDiscoveryMarker> markers = new ArrayList<>(workers.size());
+        for (WorkerRecord record : workers.values()) {
+            if (record == null || record.uuid == null || record.civilisationId == null) continue;
+            Civilisation civilisation = DataManager.getCivilisations().get(record.civilisationId);
+            if (civilisation == null || !civilisation.isActive()) continue;
+            if (record.missingTicks >= CASUALTY_CONFIRM_TICKS) continue;
+            markers.add(new VillagerDiscoveryMarker(record.lastX, record.lastZ));
         }
         return List.copyOf(markers);
     }
@@ -1321,6 +1429,7 @@ public final class PhysicalVillagerSystem {
         }
 
         Entity entity = level.getEntity(uuid);
+        entityLookupCache.put(record.uuid, entity);
         if (entity instanceof PathfinderMob deadVillager && !deadVillager.isAlive()) {
             registerWorkerCasualty(level, record, deadVillager.blockPosition());
             return;
@@ -1335,6 +1444,7 @@ public final class PhysicalVillagerSystem {
             PathfinderMob replacementBody = replaceLegacyPhysicalBody(level, record, legacyBody);
             if (replacementBody == null) return;
             entity = replacementBody;
+            entityLookupCache.put(record.uuid, replacementBody);
         }
         if (!(entity instanceof PathfinderMob villager)) {
             // Missing workers in a still-loaded chunk are casualties, not free respawns.
@@ -1520,7 +1630,18 @@ public final class PhysicalVillagerSystem {
 
         int thinkInterval = Math.max(3,
                 (int) Math.round(WORK_THINK_INTERVAL_TICKS / toolTier(record).getWorkMultiplier()));
-        if (ticks % thinkInterval != Math.floorMod(record.assignmentIndex, thinkInterval)) return;
+        // Worker servicing may be cohort-scheduled at high population. Use an elapsed
+        // deadline rather than an exact global modulo so a 3/4/5-tick service stride
+        // cannot accidentally starve a 7- or 9-tick profession cadence forever.
+        if (record.nextProfessionThinkTick <= 0L) {
+            int salt = record.assignmentIndex * 31
+                    + (record.civilisationId == null ? 0 : record.civilisationId.hashCode());
+            record.nextProfessionThinkTick = ticks + Math.floorMod(salt, thinkInterval);
+        }
+        if (ticks < record.nextProfessionThinkTick) return;
+        do {
+            record.nextProfessionThinkTick += thinkInterval;
+        } while (record.nextProfessionThinkTick <= ticks);
 
         int carried = carriedTotal(record);
         if (job == VillagerJob.MINER) {
@@ -3890,7 +4011,9 @@ public final class PhysicalVillagerSystem {
         List<BlockPos> woodTemplate = woodFactoryTemplate(origin.getX(), groundY, origin.getZ());
         BlockPos craftingSite = new BlockPos(origin.getX() + 1, groundY + 1, origin.getZ() + 1);
         BlockPos furnaceSite = new BlockPos(origin.getX() + 3, groundY + 1, origin.getZ() + 1);
+        BlockPos blastSite = new BlockPos(origin.getX() + 3, groundY + 1, origin.getZ() + 2);
         BlockPos coreSite = factoryCoreSite(origin);
+        String factoryType = normalisedFactoryType(record.factoryTypeId);
 
         // Deliver anything already manufactured before evaluating the structure. A
         // broken core disables future production but must not delete a tool/product
@@ -3918,12 +4041,13 @@ public final class PhysicalVillagerSystem {
         if ((record.factoryBuilt || record.woodenFactoryBuilt) && record.factoryCoreInitialised
                 && !level.getBlockState(coreSite).is(Blocks.BARREL)) {
             destroyFactoryAfterCoreLoss(level, civilisation, record, fullTemplate,
-                    craftingSite, furnaceSite);
+                    craftingSite, furnaceSite, blastSite);
             return;
         }
 
         if (!record.factoryBuilt && !record.woodenFactoryBuilt) {
-            if (factoryIsComplete(level, fullTemplate, groundY, craftingSite, furnaceSite, coreSite)) {
+            if (factoryIsComplete(level, fullTemplate, groundY, craftingSite, furnaceSite,
+                    blastSite, coreSite, factoryType)) {
                 record.factoryBuilt = true;
                 record.factoryCoreInitialised = true;
                 record.factorySequence = Math.max(1, record.factorySequence);
@@ -3986,7 +4110,8 @@ public final class PhysicalVillagerSystem {
             // wooden tier is to bootstrap productive stone/iron tools immediately.
             ToolDemand urgentTool = nextToolDemand(level, civilisation.getId());
             if (urgentTool != null
-                    && craftFactoryTool(level, civilisation, villager, record, craftingSite, urgentTool)) {
+                    && craftFactoryTool(level, civilisation, villager, record,
+                    craftingSite, blastSite, false, urgentTool)) {
                 return;
             }
 
@@ -4013,7 +4138,8 @@ public final class PhysicalVillagerSystem {
                     addWorkMaterial(record, ResourceType.STONE, FACTORY_TOTAL_STONE_COST);
                     return;
                 }
-                buildFactoryInstantly(level, fullTemplate, groundY, craftingSite, furnaceSite, coreSite);
+                buildFactoryInstantly(level, fullTemplate, groundY, craftingSite, furnaceSite,
+                        blastSite, coreSite, factoryType);
                 civilisation.registerPhysicalFactory();
                 record.factoryBuilt = true;
                 record.woodenFactoryBuilt = false;
@@ -4028,17 +4154,19 @@ public final class PhysicalVillagerSystem {
             }
 
             tickFactoryProduction(level, civilisation, home, villager, record,
-                    craftingSite, furnaceSite, false);
+                    craftingSite, furnaceSite, blastSite, false, false);
             return;
         }
 
         if (record.factoryBuilt && factoryIsComplete(level, fullTemplate, groundY,
-                craftingSite, furnaceSite, coreSite)) {
-            String factoryType = normalisedFactoryType(record.factoryTypeId);
+                craftingSite, furnaceSite, blastSite, coreSite, factoryType)) {
             boolean furnaceEnabled = !"wooden_factory".equals(factoryType)
                     && ResearchSystem.factoryTypeAvailable(civilisation, factoryType);
+            boolean blastEnabled = factoryRequiresBlastStation(factoryType)
+                    && level.getBlockState(blastSite).is(Blocks.BLAST_FURNACE)
+                    && ResearchSystem.factoryTypeAvailable(civilisation, factoryType);
             tickFactoryProduction(level, civilisation, home, villager, record,
-                    craftingSite, furnaceSite, furnaceEnabled);
+                    craftingSite, furnaceSite, blastSite, furnaceEnabled, blastEnabled);
             return;
         }
 
@@ -4061,7 +4189,8 @@ public final class PhysicalVillagerSystem {
                 addWorkMaterial(record, ResourceType.STONE, stoneNeeded);
                 return;
             }
-            buildFactoryInstantly(level, fullTemplate, groundY, craftingSite, furnaceSite, coreSite);
+            buildFactoryInstantly(level, fullTemplate, groundY, craftingSite, furnaceSite,
+                    blastSite, coreSite, factoryType);
             record.factoryCoreInitialised = true;
             villager.swing(InteractionHand.MAIN_HAND);
             successfulWork(record, 4.0);
@@ -4265,18 +4394,23 @@ public final class PhysicalVillagerSystem {
     }
 
     private boolean factoryIsComplete(ServerLevel level, List<BlockPos> template, int groundY,
-                                      BlockPos craftingSite, BlockPos furnaceSite, BlockPos coreSite) {
+                                      BlockPos craftingSite, BlockPos furnaceSite,
+                                      BlockPos blastSite, BlockPos coreSite, String factoryType) {
         for (BlockPos pos : template) {
             boolean floor = pos.getY() == groundY;
             if (!factoryTemplateBlockCorrect(level.getBlockState(pos), floor)) return false;
         }
-        return level.getBlockState(craftingSite).is(Blocks.CRAFTING_TABLE)
+        boolean basicStations = level.getBlockState(craftingSite).is(Blocks.CRAFTING_TABLE)
                 && level.getBlockState(furnaceSite).is(Blocks.FURNACE)
                 && level.getBlockState(coreSite).is(Blocks.BARREL);
+        if (!basicStations) return false;
+        return !factoryRequiresBlastStation(factoryType)
+                || level.getBlockState(blastSite).is(Blocks.BLAST_FURNACE);
     }
 
     private void buildFactoryInstantly(ServerLevel level, List<BlockPos> template, int groundY,
-                                       BlockPos craftingSite, BlockPos furnaceSite, BlockPos coreSite) {
+                                       BlockPos craftingSite, BlockPos furnaceSite,
+                                       BlockPos blastSite, BlockPos coreSite, String factoryType) {
         for (BlockPos pos : template) {
             boolean floor = pos.getY() == groundY;
             level.setBlockAndUpdate(pos, floor
@@ -4285,7 +4419,18 @@ public final class PhysicalVillagerSystem {
         }
         level.setBlockAndUpdate(craftingSite, Blocks.CRAFTING_TABLE.defaultBlockState());
         level.setBlockAndUpdate(furnaceSite, Blocks.FURNACE.defaultBlockState());
+        if (factoryRequiresBlastStation(factoryType)) {
+            level.setBlockAndUpdate(blastSite, Blocks.BLAST_FURNACE.defaultBlockState());
+        } else if (level.getBlockState(blastSite).is(Blocks.BLAST_FURNACE)) {
+            level.setBlockAndUpdate(blastSite, Blocks.AIR.defaultBlockState());
+        }
         level.setBlockAndUpdate(coreSite, Blocks.BARREL.defaultBlockState());
+    }
+
+    private boolean factoryRequiresBlastStation(String factoryTypeId) {
+        String id = normalisedFactoryType(factoryTypeId);
+        FactoryType type = DataManager.getFactoryTypes().get(id);
+        return type != null && (type.hasCapability("BLASTING") || type.hasCapability("STEEL"));
     }
 
     private BlockPos factoryCoreSite(BlockPos origin) {
@@ -4330,7 +4475,8 @@ public final class PhysicalVillagerSystem {
 
     private void destroyFactoryAfterCoreLoss(ServerLevel level, Civilisation civilisation,
                                              WorkerRecord record, List<BlockPos> fullTemplate,
-                                             BlockPos craftingSite, BlockPos furnaceSite) {
+                                             BlockPos craftingSite, BlockPos furnaceSite,
+                                             BlockPos blastSite) {
         // Core loss makes the factory cease to exist functionally. Remove only the
         // known factory blocks from its own footprint, leaving unrelated player blocks
         // untouched. A replacement builder can later reconstruct the site.
@@ -4342,6 +4488,7 @@ public final class PhysicalVillagerSystem {
         }
         if (level.getBlockState(craftingSite).is(Blocks.CRAFTING_TABLE)) level.destroyBlock(craftingSite, false);
         if (level.getBlockState(furnaceSite).is(Blocks.FURNACE)) level.destroyBlock(furnaceSite, false);
+        if (level.getBlockState(blastSite).is(Blocks.BLAST_FURNACE)) level.destroyBlock(blastSite, false);
         if (record.factoryBuilt && civilisation != null) civilisation.addFactories(-1);
         record.factoryBuilt = false;
         record.woodenFactoryBuilt = false;
@@ -4403,10 +4550,11 @@ public final class PhysicalVillagerSystem {
 
     private void tickFactoryProduction(ServerLevel level, Civilisation civilisation, City home,
                                        PathfinderMob villager, WorkerRecord record,
-                                       BlockPos craftingSite, BlockPos furnaceSite,
-                                       boolean furnaceAvailable) {
+                                       BlockPos craftingSite, BlockPos furnaceSite, BlockPos blastSite,
+                                       boolean furnaceAvailable, boolean blastAvailable) {
         if (depositFactoryProduct(level, civilisation.getId(), villager, record)) return;
-        if (tryQueuedFactoryProduction(level, civilisation, villager, record, craftingSite, furnaceSite, furnaceAvailable)) return;
+        if (tryQueuedFactoryProduction(level, civilisation, villager, record,
+                craftingSite, furnaceSite, blastSite, furnaceAvailable, blastAvailable)) return;
 
         // If every depot chest is packed, production first expands storage. The
         // factory worker withdraws real wood, crafts a chest, walks back to the
@@ -4431,7 +4579,8 @@ public final class PhysicalVillagerSystem {
 
         ToolDemand toolDemand = nextToolDemand(level, civilisation.getId());
         if (toolDemand != null) {
-            if (craftFactoryTool(level, civilisation, villager, record, craftingSite, toolDemand)) return;
+            if (craftFactoryTool(level, civilisation, villager, record,
+                    craftingSite, blastSite, blastAvailable, toolDemand)) return;
         }
 
         // Keep a practical lighting stockpile for administrators. One coal/charcoal
@@ -4530,8 +4679,8 @@ public final class PhysicalVillagerSystem {
      * automatically share production without per-building micromanagement. */
     private boolean tryQueuedFactoryProduction(ServerLevel level, Civilisation civilisation,
                                                PathfinderMob villager, WorkerRecord record,
-                                               BlockPos craftingSite, BlockPos furnaceSite,
-                                               boolean furnaceAvailable) {
+                                               BlockPos craftingSite, BlockPos furnaceSite, BlockPos blastSite,
+                                               boolean furnaceAvailable, boolean blastAvailable) {
         String factoryType = normalisedFactoryType(record.factoryTypeId);
         List<FactoryRecipe> recipes = ResearchSystem.recipesForFactoryTypes(civilisation, List.of(factoryType));
         List<String> ids = recipes.stream().map(FactoryRecipe::getId).toList();
@@ -4539,7 +4688,11 @@ public final class PhysicalVillagerSystem {
         if (order == null) return false;
         FactoryRecipe recipe = DataManager.getFactoryRecipes().get(order.getRecipeId());
         if (recipe == null) return false;
-        if ("SMELTING".equalsIgnoreCase(recipe.getCapability()) && !furnaceAvailable) return false;
+
+        String capability = recipe.getCapability() == null ? "" : recipe.getCapability();
+        if ("SMELTING".equalsIgnoreCase(capability) && !furnaceAvailable) return false;
+        if (("BLASTING".equalsIgnoreCase(capability) || "STEEL".equalsIgnoreCase(capability))
+                && !blastAvailable) return false;
 
         ResourceType first = null, second = null;
         int firstCount = 0, secondCount = 0;
@@ -4552,14 +4705,33 @@ public final class PhysicalVillagerSystem {
             case "stone_pickaxe" -> { first = ResourceType.STONE; firstCount = 3; second = ResourceType.WOOD; secondCount = 1; }
             case "iron_pickaxe" -> { first = ResourceType.IRON; firstCount = 3; second = ResourceType.WOOD; secondCount = 1; }
             case "charcoal" -> { first = ResourceType.WOOD; firstCount = 4; }
+            case "drenough_coke" -> { first = ResourceType.COAL; firstCount = 1; }
+            case "drenough_steel_ingot" -> {
+                first = ResourceType.IRON; firstCount = 1;
+                second = ResourceType.COAL; secondCount = 1;
+            }
             default -> { return false; }
         }
-        if (fetchWorkMaterial(level, civilisation.getId(), villager, record, first, firstCount, Math.max(8, firstCount))) return true;
-        if (second != null && fetchWorkMaterial(level, civilisation.getId(), villager, record, second, secondCount, Math.max(8, secondCount))) return true;
-        BlockPos station = "SMELTING".equalsIgnoreCase(recipe.getCapability()) ? furnaceSite : craftingSite;
-        if (!near(villager, station, 3.0)) { moveTo(level, villager, station, record); return true; }
+
+        if (fetchWorkMaterial(level, civilisation.getId(), villager, record, first, firstCount,
+                Math.max(8, firstCount))) return true;
+        if (second != null && fetchWorkMaterial(level, civilisation.getId(), villager, record,
+                second, secondCount, Math.max(8, secondCount))) return true;
+
+        BlockPos station = ("BLASTING".equalsIgnoreCase(capability) || "STEEL".equalsIgnoreCase(capability))
+                ? blastSite
+                : "SMELTING".equalsIgnoreCase(capability) ? furnaceSite : craftingSite;
+        if (station == null) return false;
+        if (!near(villager, station, 3.0)) {
+            moveTo(level, villager, station, record);
+            return true;
+        }
         if (!consumeWorkMaterial(record, first, firstCount)) return true;
-        if (second != null && !consumeWorkMaterial(record, second, secondCount)) { addWorkMaterial(record, first, firstCount); return true; }
+        if (second != null && !consumeWorkMaterial(record, second, secondCount)) {
+            addWorkMaterial(record, first, firstCount);
+            return true;
+        }
+
         String token = switch (id) {
             case "chest" -> "CHEST_ITEM";
             case "bread" -> "BREAD";
@@ -4568,9 +4740,14 @@ public final class PhysicalVillagerSystem {
             case "stone_pickaxe" -> factoryProductToken(Items.STONE_PICKAXE);
             case "iron_pickaxe" -> factoryProductToken(Items.IRON_PICKAXE);
             case "charcoal" -> "CHARCOAL";
+            case "drenough_coke" -> factoryProductToken(
+                    MinecraftItemRegistry.item("drenough_forging:coke"));
+            case "drenough_steel_ingot" -> factoryProductToken(
+                    MinecraftItemRegistry.item("drenough_forging:steel_ingot"));
             default -> null;
         };
         if (token == null) return false;
+
         record.factoryProduct = token;
         record.factoryProductCount = Math.max(1, recipe.getOutputCount());
         civilisation.recordProduction(order.getSerial(), record.factoryProductCount);
@@ -4606,22 +4783,69 @@ public final class PhysicalVillagerSystem {
             case "stone_pickaxe" -> civilisation.getResource(ResourceType.STONE) >= 3 && civilisation.getResource(ResourceType.WOOD) >= 1;
             case "iron_pickaxe" -> civilisation.getResource(ResourceType.IRON) >= 3 && civilisation.getResource(ResourceType.WOOD) >= 1;
             case "charcoal" -> civilisation.getResource(ResourceType.WOOD) >= 4;
+            case "drenough_coke" -> civilisation.getResource(ResourceType.COAL) >= 1;
+            case "drenough_steel_ingot" -> civilisation.getResource(ResourceType.IRON) >= 1
+                    && civilisation.getResource(ResourceType.COAL) >= 1;
             default -> false;
         };
     }
 
     private boolean craftFactoryTool(ServerLevel level, Civilisation civilisation,
                                      PathfinderMob villager, WorkerRecord record,
-                                     BlockPos craftingSite, ToolDemand demand) {
+                                     BlockPos craftingSite, BlockPos blastSite,
+                                     boolean blastAvailable, ToolDemand demand) {
         int headCost = toolHeadCost(demand.job());
         if (headCost <= 0) return false;
+
         String factoryType = normalisedFactoryType(record.factoryTypeId);
+        FactoryType type = DataManager.getFactoryTypes().get(factoryType);
+
+        // Wooden workshops may make stone tools, but metal tiers require a durable
+        // factory. Steel additionally requires a factory explicitly capable of STEEL.
         if ("wooden_factory".equals(factoryType)
                 && demand.tier().ordinal() >= WorkerToolTier.IRON.ordinal()) return false;
+        if (demand.tier() == WorkerToolTier.STEEL
+                && (type == null || !type.hasCapability("STEEL"))) return false;
+
         if (demand.tier() == WorkerToolTier.WOOD) {
             int wood = headCost + 1;
             if (fetchWorkMaterial(level, civilisation.getId(), villager, record,
                     ResourceType.WOOD, wood, Math.max(wood, 16))) return true;
+        } else if (demand.tier() == WorkerToolTier.STEEL) {
+            Item steelIngot = MinecraftItemRegistry.item("drenough_forging:steel_ingot");
+            if (steelIngot == null) return false;
+
+            // Steel tools consume the actual optional-mod ingot. If there is not
+            // enough in storage, a blast-capable steel factory first makes a batch
+            // from iron + coal and physically deposits those real ingots.
+            if (!WorkerToolTier.STEEL.name().equals(record.preparedToolTier)) {
+                int stocked = countSpecificItems(level, civilisation.getId(), steelIngot)
+                        + pendingFactoryProductCount(civilisation.getId(), steelIngot);
+                if (stocked < headCost) {
+                    if (blastAvailable && produceSteelIngotBatch(level, civilisation, villager,
+                            record, blastSite, headCost)) return true;
+                    return false;
+                }
+
+                BlockPos chest = nearestDepotChestWithSpecificItem(level, civilisation.getId(),
+                        steelIngot, villager.blockPosition(), record);
+                if (chest == null) return false;
+                if (walkToDepotChest(level, villager, chest, record, 3.2)) return true;
+                BlockEntity blockEntity = level.getBlockEntity(chest);
+                if (!(blockEntity instanceof Container container)) return true;
+                if (removeSpecificItems(container, List.of(steelIngot), headCost) < headCost) return true;
+
+                // The ingots are now physically withdrawn. preparedToolTier is the
+                // durable transaction marker while the worker walks back to the bench.
+                record.preparedToolTier = WorkerToolTier.STEEL.name();
+                villager.swing(InteractionHand.MAIN_HAND);
+                clearMoveTarget(record);
+                dirty = true;
+                return true;
+            }
+
+            if (fetchWorkMaterial(level, civilisation.getId(), villager, record,
+                    ResourceType.WOOD, 1, 8)) return true;
         } else {
             ResourceType headMaterial = switch (demand.tier()) {
                 case STONE -> ResourceType.STONE;
@@ -4643,6 +4867,10 @@ public final class PhysicalVillagerSystem {
 
         if (demand.tier() == WorkerToolTier.WOOD) {
             if (!consumeWorkMaterial(record, ResourceType.WOOD, headCost + 1)) return false;
+        } else if (demand.tier() == WorkerToolTier.STEEL) {
+            if (!WorkerToolTier.STEEL.name().equals(record.preparedToolTier)) return false;
+            if (!consumeWorkMaterial(record, ResourceType.WOOD, 1)) return false;
+            record.preparedToolTier = null;
         } else {
             ResourceType headMaterial = switch (demand.tier()) {
                 case STONE -> ResourceType.STONE;
@@ -4670,13 +4898,61 @@ public final class PhysicalVillagerSystem {
         return true;
     }
 
+    /**
+     * Closed optional-mod production path used by automatic tool provisioning.
+     * This never invokes Dr. Enough Forging code: the output is resolved solely by
+     * the registry id "drenough_forging:steel_ingot".
+     */
+    private boolean produceSteelIngotBatch(ServerLevel level, Civilisation civilisation,
+                                           PathfinderMob villager, WorkerRecord record,
+                                           BlockPos blastSite, int desiredCount) {
+        Item steelIngot = MinecraftItemRegistry.item("drenough_forging:steel_ingot");
+        if (steelIngot == null || desiredCount <= 0 || blastSite == null
+                || !level.getBlockState(blastSite).is(Blocks.BLAST_FURNACE)) return false;
+
+        int batch = Math.max(1, desiredCount);
+        if (fetchWorkMaterial(level, civilisation.getId(), villager, record,
+                ResourceType.IRON, batch, Math.max(batch, 8))) return true;
+        if (fetchWorkMaterial(level, civilisation.getId(), villager, record,
+                ResourceType.COAL, batch, Math.max(batch, 8))) return true;
+
+        if (!near(villager, blastSite, 3.0)) {
+            moveTo(level, villager, blastSite, record);
+            return true;
+        }
+        if (!consumeWorkMaterial(record, ResourceType.IRON, batch)) return false;
+        if (!consumeWorkMaterial(record, ResourceType.COAL, batch)) {
+            addWorkMaterial(record, ResourceType.IRON, batch);
+            return false;
+        }
+
+        String token = factoryProductToken(steelIngot);
+        if (token == null) {
+            addWorkMaterial(record, ResourceType.IRON, batch);
+            addWorkMaterial(record, ResourceType.COAL, batch);
+            return false;
+        }
+        record.factoryProduct = token;
+        record.factoryProductCount = batch;
+        updateCarriedDisplay(villager, record);
+        villager.swing(InteractionHand.MAIN_HAND);
+        finishLocalTaskMovement(villager, record);
+        successfulWork(record, 1.8);
+        dirty = true;
+        return true;
+    }
+
     private ToolDemand nextToolDemand(ServerLevel level, String civilisationId) {
+        Civilisation civilisation = DataManager.getCivilisations().get(civilisationId);
+        if (civilisation == null) return null;
+
         List<WorkerRecord> candidates = workers.values().stream()
                 .filter(worker -> Objects.equals(civilisationId, worker.civilisationId))
                 .filter(worker -> supportsTool(parseJob(worker.job)))
                 .filter(worker -> {
+                    VillagerJob job = parseJob(worker.job);
                     WorkerToolTier current = toolTier(worker);
-                    WorkerToolTier next = current.next();
+                    WorkerToolTier next = nextToolTier(civilisation, job, current);
                     // Wooden tools are self-crafted directly from depot wood and
                     // must never consume factory production capacity.
                     return next != current
@@ -4691,9 +4967,8 @@ public final class PhysicalVillagerSystem {
 
         for (WorkerRecord worker : candidates) {
             VillagerJob job = parseJob(worker.job);
-            WorkerToolTier next = toolTier(worker).next();
-            Civilisation civilisation = DataManager.getCivilisations().get(civilisationId);
-            if (civilisation == null || !ResearchSystem.canUseToolTier(civilisation, job, next)) continue;
+            WorkerToolTier next = nextToolTier(civilisation, job, toolTier(worker));
+            if (next == toolTier(worker) || !ResearchSystem.canUseToolTier(civilisation, job, next)) continue;
             Item item = toolFor(job, next);
             if (item == null) continue;
             if (countSpecificItems(level, civilisationId, item) > 0
@@ -4802,7 +5077,7 @@ public final class PhysicalVillagerSystem {
         if (state == null || state.isAir() || state.is(Blocks.BEDROCK)) return false;
         if (state.is(Blocks.CHEST) || state.is(Blocks.TRAPPED_CHEST)
                 || state.is(Blocks.CRAFTING_TABLE) || state.is(Blocks.FURNACE)
-                || state.is(Blocks.BARREL)) return false;
+                || state.is(Blocks.BLAST_FURNACE) || state.is(Blocks.BARREL)) return false;
         return level.getBlockEntity(pos) == null;
     }
 
@@ -5287,7 +5562,7 @@ public final class PhysicalVillagerSystem {
                                                   PathfinderMob soldier, WorkerRecord soldierRecord) {
         PathfinderMob best = null;
         double bestScore = Double.POSITIVE_INFINITY;
-        for (WorkerRecord candidate : new ArrayList<>(workers.values())) {
+        for (WorkerRecord candidate : workers.values()) {
             if (candidate == soldierRecord || candidate.uuid == null
                     || parseJob(candidate.job) != VillagerJob.SOLDIER
                     || Objects.equals(candidate.civilisationId, soldierRecord.civilisationId)
@@ -5352,13 +5627,20 @@ public final class PhysicalVillagerSystem {
     }
 
     private Entity entityFromUuid(ServerLevel level, String uuidText) {
-        if (uuidText == null || uuidText.isBlank()) return null;
+        if (level == null || uuidText == null || uuidText.isBlank()) return null;
+        if (entityLookupCache.containsKey(uuidText)) {
+            Entity cached = entityLookupCache.get(uuidText);
+            return cached != null && cached.isAlive() ? cached : null;
+        }
+        Entity entity;
         try {
-            Entity entity = level.getEntity(UUID.fromString(uuidText));
-            return entity != null && entity.isAlive() ? entity : null;
+            entity = level.getEntity(UUID.fromString(uuidText));
         } catch (IllegalArgumentException ignored) {
+            entityLookupCache.put(uuidText, null);
             return null;
         }
+        entityLookupCache.put(uuidText, entity);
+        return entity != null && entity.isAlive() ? entity : null;
     }
 
     private boolean validCombatTarget(Civilisation civilisation, PathfinderMob soldier, Entity entity) {
@@ -5396,7 +5678,7 @@ public final class PhysicalVillagerSystem {
         CombatTarget best = null;
         double bestScore = Double.POSITIVE_INFINITY;
         double maxDistanceSq = range * range;
-        for (WorkerRecord candidate : new ArrayList<>(workers.values())) {
+        for (WorkerRecord candidate : workers.values()) {
             if (candidate == soldierRecord || candidate.uuid == null
                     || Objects.equals(candidate.civilisationId, soldierRecord.civilisationId)
                     || parseJob(candidate.job) != VillagerJob.SOLDIER) continue;
@@ -5422,7 +5704,7 @@ public final class PhysicalVillagerSystem {
         CombatTarget best = null;
         double bestScore = Double.POSITIVE_INFINITY;
         double maxDistanceSq = range * range;
-        for (WorkerRecord candidate : new ArrayList<>(workers.values())) {
+        for (WorkerRecord candidate : workers.values()) {
             if (candidate == soldierRecord || candidate.uuid == null
                     || Objects.equals(candidate.civilisationId, soldierRecord.civilisationId)) continue;
             if (!WarSystem.getInstance().areAtWar(civilisation.getId(), candidate.civilisationId)) continue;
@@ -5534,6 +5816,7 @@ public final class PhysicalVillagerSystem {
             case WOOD -> 3.5f;
             case STONE -> 5.0f;
             case IRON -> 6.5f;
+            case STEEL -> 7.25f;
             case DIAMOND -> 8.0f;
         };
         Civilisation civilisation = record == null ? null : DataManager.getCivilisations().get(record.civilisationId);
@@ -5991,6 +6274,7 @@ public final class PhysicalVillagerSystem {
 
         BlockPos best = null;
         double bestScore = Double.POSITIVE_INFINITY;
+        boolean miner = parseJob(record.job) == VillagerJob.MINER;
         boolean underground = record.inMine || record.mineTransitDirection != 0
                 || requested.getY() + 3 < level.getHeight(
                         Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, requested.getX(), requested.getZ());
@@ -6001,7 +6285,7 @@ public final class PhysicalVillagerSystem {
                     int x = requested.getX() + dx;
                     int z = requested.getZ() + dz;
                     if (!isChunkLoaded(level, x, z)) continue;
-                    if (parseJob(record.job) != VillagerJob.MINER && isMineSurfaceExclusion(record, x, z)) continue;
+                    if (!miner && isMineSurfaceExclusion(record, x, z)) continue;
                     if (underground) {
                         for (int dy = -2; dy <= 2; dy++) {
                             BlockPos candidate = new BlockPos(x, requested.getY() + dy, z);
@@ -6100,7 +6384,14 @@ public final class PhysicalVillagerSystem {
                                        WorkerRecord record, WorkerBrainState brain) {
         if (brain == null || !brain.hasGoal || brain.escaping || brain.routeRequestPending) return;
         if (brain.route != null && brain.routeIndex < brain.route.size()) return;
-        if (WorkerPlannerService.getInstance().hasPending(record.uuid)) return;
+        WorkerPlannerService planner = WorkerPlannerService.getInstance();
+        if (planner.hasPending(record.uuid) || !planner.canAccept(record.uuid)) return;
+        // Snapshot capture is the main-thread half of route planning. Keep a strict
+        // per-tick budget so a large settlement cannot synchronously scan dozens of
+        // route corridors in one 50 ms server tick. Deferred workers simply retry on
+        // their next service slot while their existing local navigation continues.
+        if (navigationSnapshotsThisTick >= MAX_NAVIGATION_SNAPSHOT_CAPTURES_PER_TICK) return;
+        navigationSnapshotsThisTick++;
 
         NavigationSnapshot snapshot = captureNavigationSnapshot(level, villager.blockPosition(), brain, record);
         BlockPos finalGoal = new BlockPos(brain.goalX, brain.goalY, brain.goalZ);
@@ -6110,7 +6401,7 @@ public final class PhysicalVillagerSystem {
             return;
         }
         long generation = brain.planGeneration + 1L;
-        if (WorkerPlannerService.getInstance().requestRoute(record.uuid, generation, snapshot)) {
+        if (planner.requestRoute(record.uuid, generation, snapshot)) {
             brain.planGeneration = generation;
             brain.routeRequestPending = true;
             brain.lastPlanTick = ticks;
@@ -6165,6 +6456,7 @@ public final class PhysicalVillagerSystem {
                 Math.max(2, Math.floorDiv(maxZ - originZ, cell) + 2));
         int[] heights = new int[width * depth];
         byte[] terrain = new byte[width * depth];
+        boolean miner = parseJob(record.job) == VillagerJob.MINER;
 
         for (int cz = 0; cz < depth; cz++) {
             for (int cx = 0; cx < width; cx++) {
@@ -6180,7 +6472,7 @@ public final class PhysicalVillagerSystem {
                 y = feet.getY();
                 heights[idx] = y;
                 BlockState below = level.getBlockState(feet.below());
-                if (parseJob(record.job) != VillagerJob.MINER && isMineSurfaceExclusion(record, wx, wz)) {
+                if (!miner && isMineSurfaceExclusion(record, wx, wz)) {
                     terrain[idx] = NavigationSnapshot.BLOCKED;
                 } else if (!level.getFluidState(feet).isEmpty() || !level.getFluidState(feet.below()).isEmpty()) {
                     terrain[idx] = NavigationSnapshot.WATER;
@@ -6308,11 +6600,15 @@ public final class PhysicalVillagerSystem {
     private void requestEscapePlan(ServerLevel level, PathfinderMob villager, WorkerRecord record,
                                    NavigationFailure failure) {
         WorkerBrainState brain = ensureBrain(record);
-        if (brain.escapeRequestPending || brain.escaping || WorkerPlannerService.getInstance().hasPending(record.uuid)) return;
+        WorkerPlannerService planner = WorkerPlannerService.getInstance();
+        if (brain.escapeRequestPending || brain.escaping || planner.hasPending(record.uuid)
+                || !planner.canAccept(record.uuid)) return;
+        if (escapeSnapshotsThisTick >= MAX_ESCAPE_SNAPSHOT_CAPTURES_PER_TICK) return;
+        escapeSnapshotsThisTick++;
         EscapeSnapshot snapshot = captureEscapeSnapshot(level, villager, brain);
         if (snapshot == null) return;
         long generation = brain.planGeneration + 1L;
-        if (WorkerPlannerService.getInstance().requestEscape(record.uuid, generation, snapshot)) {
+        if (planner.requestEscape(record.uuid, generation, snapshot)) {
             brain.planGeneration = generation;
             brain.escapeRequestPending = true;
             brain.lastPlanTick = ticks;
@@ -8311,7 +8607,7 @@ public final class PhysicalVillagerSystem {
      * wooden tool directly. One stored log supplies four plank-equivalent units, so a
      * single log is enough for every wooden profession tool used here.
      *
-     * Stone, iron and diamond upgrades remain factory products: after the worker has
+     * Stone, iron, optional steel and diamond upgrades remain factory products: after the worker has
      * enough experience it collects the already-crafted tool from a depot chest.
      */
     private boolean maybeUpgradeTool(ServerLevel level, Civilisation civilisation, City home,
@@ -8320,7 +8616,7 @@ public final class PhysicalVillagerSystem {
         if (!supportsTool(job)) return false;
 
         WorkerToolTier current = toolTier(record);
-        WorkerToolTier next = current.next();
+        WorkerToolTier next = nextToolTier(civilisation, job, current);
         if (next == current) return false;
         if (!ResearchSystem.canUseToolTier(civilisation, job, next)) return false;
 
@@ -8528,12 +8824,13 @@ public final class PhysicalVillagerSystem {
     }
 
     private Item toolFor(VillagerJob job, WorkerToolTier tier) {
-        if (tier == WorkerToolTier.HAND) return null;
+        if (tier == null || tier == WorkerToolTier.HAND) return null;
         return switch (job) {
             case LUMBERJACK -> switch (tier) {
                 case WOOD -> Items.WOODEN_AXE;
                 case STONE -> Items.STONE_AXE;
                 case IRON -> Items.IRON_AXE;
+                case STEEL -> MinecraftItemRegistry.item("drenough_forging:steel_axe");
                 case DIAMOND -> Items.DIAMOND_AXE;
                 default -> null;
             };
@@ -8541,6 +8838,7 @@ public final class PhysicalVillagerSystem {
                 case WOOD -> Items.WOODEN_PICKAXE;
                 case STONE -> Items.STONE_PICKAXE;
                 case IRON -> Items.IRON_PICKAXE;
+                case STEEL -> MinecraftItemRegistry.item("drenough_forging:steel_pickaxe");
                 case DIAMOND -> Items.DIAMOND_PICKAXE;
                 default -> null;
             };
@@ -8548,6 +8846,7 @@ public final class PhysicalVillagerSystem {
                 case WOOD -> Items.WOODEN_HOE;
                 case STONE -> Items.STONE_HOE;
                 case IRON -> Items.IRON_HOE;
+                case STEEL -> MinecraftItemRegistry.item("drenough_forging:steel_hoe");
                 case DIAMOND -> Items.DIAMOND_HOE;
                 default -> null;
             };
@@ -8555,11 +8854,29 @@ public final class PhysicalVillagerSystem {
                 case WOOD -> Items.WOODEN_SWORD;
                 case STONE -> Items.STONE_SWORD;
                 case IRON -> Items.IRON_SWORD;
+                case STEEL -> MinecraftItemRegistry.item("drenough_forging:steel_sword");
                 case DIAMOND -> Items.DIAMOND_SWORD;
                 default -> null;
             };
             default -> null;
         };
+    }
+
+    /**
+     * Returns the next physical tier that actually exists in the current registry set.
+     * STEEL is skipped when Dr. Enough Forging is absent, so a vanilla-only world can
+     * still move from iron to diamond after researching Advanced Mining.
+     */
+    private WorkerToolTier nextToolTier(Civilisation civilisation, VillagerJob job,
+                                        WorkerToolTier current) {
+        if (current == null) current = WorkerToolTier.HAND;
+        WorkerToolTier[] tiers = WorkerToolTier.values();
+        for (int i = current.ordinal() + 1; i < tiers.length; i++) {
+            WorkerToolTier candidate = tiers[i];
+            if (candidate == WorkerToolTier.STEEL && toolFor(job, candidate) == null) continue;
+            return candidate;
+        }
+        return current;
     }
 
     private void updateCarriedDisplay(PathfinderMob villager, WorkerRecord record) {
@@ -8950,11 +9267,15 @@ public final class PhysicalVillagerSystem {
 
     private City cityById(String cityId) {
         if (cityId == null) return null;
-        for (Providence providence : DataManager.getProvidences().values()) {
-            City city = providence.getCity();
-            if (city != null && cityId.equals(city.getId())) return city;
+        if (cityLookupCacheTick != ticks) {
+            cityLookupCache.clear();
+            for (Providence providence : DataManager.getProvidences().values()) {
+                City city = providence == null ? null : providence.getCity();
+                if (city != null && city.getId() != null) cityLookupCache.put(city.getId(), city);
+            }
+            cityLookupCacheTick = ticks;
         }
-        return null;
+        return cityLookupCache.get(cityId);
     }
 
     private int insertResourceItems(Container container, ResourceType type, int amount) {
@@ -9450,7 +9771,8 @@ public final class PhysicalVillagerSystem {
         if (item == Items.STONE_SWORD) return "STONE_SWORD";
         if (item == Items.IRON_SWORD) return "IRON_SWORD";
         if (item == Items.DIAMOND_SWORD) return "DIAMOND_SWORD";
-        return null;
+        String id = MinecraftItemRegistry.itemId(item);
+        return id == null || id.isBlank() ? null : "ITEM:" + id;
     }
 
     private Item factoryProductItem(String token) {
@@ -9477,7 +9799,9 @@ public final class PhysicalVillagerSystem {
             case "STONE_SWORD" -> Items.STONE_SWORD;
             case "IRON_SWORD" -> Items.IRON_SWORD;
             case "DIAMOND_SWORD" -> Items.DIAMOND_SWORD;
-            default -> null;
+            default -> token.startsWith("ITEM:")
+                    ? MinecraftItemRegistry.item(token.substring("ITEM:".length()))
+                    : null;
         };
     }
 
@@ -10392,11 +10716,14 @@ public final class PhysicalVillagerSystem {
         return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
     }
 
-    /** Position/job snapshot sent to clients and consumed by WorldMapTracker. */
+    /** Position/job snapshot sent to clients. */
     public record VillagerMapMarker(String uuid, String civilisationId, String job,
                                     int appearanceVariant, int assignmentIndex,
                                     String toolTier, String status, int carriedItems,
                                     int blockX, int blockY, int blockZ) { }
+
+    /** Position-only record for map discovery hot paths. */
+    public record VillagerDiscoveryMarker(int blockX, int blockZ) { }
 
     /** Map-visible player-designated profession district. */
     public record WorkZoneMapMarker(String id, String civilisationId, String type,
@@ -10484,6 +10811,8 @@ public final class PhysicalVillagerSystem {
         int lastZ;
         int missingTicks;
         int workCounter;
+        /** Runtime-only profession deadline; excluded from Gson saves. */
+        transient long nextProfessionThinkTick;
         int buildProgress;
         int factorySequence;
         String factoryTypeId = "wooden_factory";
@@ -10637,3 +10966,4 @@ public final class PhysicalVillagerSystem {
         }
     }
 }
+

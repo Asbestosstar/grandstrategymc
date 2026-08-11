@@ -87,3 +87,4 @@ public class Religion {
     public double getCropGrowthModifier() { return cropGrowthModifier; }
     public double getResearchModifier() { return researchModifier; }
 }
+

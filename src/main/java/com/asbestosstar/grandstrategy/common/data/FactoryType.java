@@ -48,3 +48,4 @@ public class FactoryType {
         return capabilities.stream().anyMatch(value -> capability.equalsIgnoreCase(value));
     }
 }
+

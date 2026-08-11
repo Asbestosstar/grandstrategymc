@@ -50,3 +50,4 @@ public final class FactoryTypeSelectionScreen extends StrategyScreen {
     }
     @Override protected StrategyScreen recreate() { return new FactoryTypeSelectionScreen(getParentScreen()); }
 }
+

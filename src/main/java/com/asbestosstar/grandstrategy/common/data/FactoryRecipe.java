@@ -55,3 +55,4 @@ public class FactoryRecipe {
     public List<String> getRequiredItemIds() { return requiredItemIds == null ? List.of() : List.copyOf(requiredItemIds); }
     public String getCapability() { return capability; }
 }
+

@@ -62,3 +62,4 @@ public final class FactoryScreen extends StrategyScreen {
     }
     @Override protected StrategyScreen recreate() { return new FactoryScreen(getParentScreen()); }
 }
+

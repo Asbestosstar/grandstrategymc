@@ -86,3 +86,4 @@ public class Technology {
     public double getIdeologicalExtremismDelta() { return ideologicalExtremismDelta; }
     public double getStabilityDelta() { return stabilityDelta; }
 }
+

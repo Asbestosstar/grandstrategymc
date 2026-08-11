@@ -116,3 +116,4 @@ public final class ResearchScreen extends StrategyScreen {
         return new ResearchScreen(getParentScreen());
     }
 }
+

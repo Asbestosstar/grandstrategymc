@@ -105,7 +105,12 @@ public final class NetworkManager {
         ensureCommandRegistered(server);
         serverTicks++;
 
-        if (serverTicks % PERIODIC_SYNC_TICKS != 0) return;
+        // Snapshot JSON contains every physical worker and is encoded on the server
+        // thread. At large populations halve the periodic snapshot frequency; explicit
+        // UI actions still trigger immediate snapshots, so controls stay responsive.
+        int syncInterval = PhysicalVillagerSystem.getInstance().workerCount() > 96
+                ? PERIODIC_SYNC_TICKS * 2 : PERIODIC_SYNC_TICKS;
+        if (serverTicks % syncInterval != 0) return;
 
         subscribedPlayers.keySet().removeIf(uuid -> server.getPlayerList().getPlayer(uuid) == null);
         for (UUID uuid : List.copyOf(subscribedPlayers.keySet())) {
@@ -716,6 +721,7 @@ public final class NetworkManager {
         int maxChunkZ;
     }
 }
+
 
 
 

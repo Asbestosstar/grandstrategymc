@@ -37,3 +37,4 @@ public final class FactoryConversionScreen extends StrategyScreen {
     @Override protected void renderCustom(GuiGraphicsExtractor g,int mx,int my,float pt){ g.text(this.font,"Factory conversion",18,38,TEXT,true); g.text(this.font,"Each button cycles that district to the next researched type. Conversion keeps the same district and worker.",18,48,MUTED_TEXT,true); if(!status.isBlank())g.text(this.font,status,18,this.height-18,GOOD_TEXT,true); }
     @Override protected StrategyScreen recreate(){return new FactoryConversionScreen(getParentScreen());}
 }
+

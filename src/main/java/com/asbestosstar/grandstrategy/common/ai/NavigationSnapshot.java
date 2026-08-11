@@ -39,3 +39,4 @@ public record NavigationSnapshot(
     public boolean inside(int x, int z) { return x >= 0 && z >= 0 && x < width && z < depth; }
 }
 
+

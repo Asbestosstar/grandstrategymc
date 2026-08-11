@@ -66,3 +66,4 @@ public final class ProductionScreen extends StrategyScreen {
     private static String shortId(String s){int i=s==null?-1:s.indexOf(':');return i>=0?s.substring(i+1):String.valueOf(s);}
     @Override protected StrategyScreen recreate(){return new ProductionScreen(getParentScreen());}
 }
+

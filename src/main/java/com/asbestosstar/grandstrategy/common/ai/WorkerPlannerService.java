@@ -13,6 +13,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Multithreaded planner for physical workers.
@@ -25,6 +26,8 @@ import java.util.concurrent.TimeUnit;
 public final class WorkerPlannerService {
     private static final WorkerPlannerService INSTANCE = new WorkerPlannerService();
     private final Map<String, CompletableFuture<PlannerResult>> pending = new ConcurrentHashMap<>();
+    /** Number of planner computations actually running/queued in the pool. */
+    private final AtomicInteger activeJobs = new AtomicInteger();
     private ForkJoinPool pool;
     private int maxPending = 64;
 
@@ -35,8 +38,13 @@ public final class WorkerPlannerService {
     public synchronized void start() {
         stop();
         int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
-        int parallelism = Math.max(2, processors / 2);
+        // Route planning is pure snapshot work, so use most cores while deliberately
+        // leaving roughly one quarter of the machine available for Minecraft's main
+        // server thread, rendering/network threads and the strategy simulation pool.
+        int reserved = Math.max(1, processors / 4);
+        int parallelism = Math.max(2, processors - reserved);
         maxPending = Math.max(32, parallelism * 8);
+        activeJobs.set(0);
         pool = new ForkJoinPool(parallelism);
     }
 
@@ -52,6 +60,7 @@ public final class WorkerPlannerService {
             }
             pool = null;
         }
+        activeJobs.set(0);
     }
 
     public boolean hasPending(String workerUuid) {
@@ -59,14 +68,29 @@ public final class WorkerPlannerService {
         return f != null && !f.isDone();
     }
 
-    /** Only live computations consume planner capacity; completed results waiting for
-     * their worker to tick must never globally block new route requests. */
-    private int activePendingCount() {
-        int count = 0;
-        for (CompletableFuture<PlannerResult> future : pending.values()) {
-            if (future != null && !future.isDone()) count++;
+    /**
+     * Cheap admission check used before the server thread captures an expensive terrain
+     * snapshot. This is intentionally separate from requestRoute/requestEscape so a
+     * saturated planner does not make the main thread scan thousands of blocks only to
+     * reject the job afterwards.
+     */
+    public boolean canAccept(String workerUuid) {
+        ForkJoinPool executor = pool;
+        if (workerUuid == null || executor == null || executor.isShutdown()) return false;
+        CompletableFuture<PlannerResult> existing = pending.get(workerUuid);
+        return (existing == null || existing.isDone()) && activeJobs.get() < maxPending;
+    }
+
+    private boolean tryAcquirePlannerSlot() {
+        while (true) {
+            int current = activeJobs.get();
+            if (current >= maxPending) return false;
+            if (activeJobs.compareAndSet(current, current + 1)) return true;
         }
-        return count;
+    }
+
+    private void releasePlannerSlot() {
+        activeJobs.updateAndGet(value -> Math.max(0, value - 1));
     }
 
     /** Drops an obsolete planner request when a physical worker body is migrated. */
@@ -81,12 +105,18 @@ public final class WorkerPlannerService {
         if (workerUuid == null || snapshot == null || executor == null || executor.isShutdown()) return false;
         CompletableFuture<PlannerResult> existing = pending.get(workerUuid);
         if (existing != null && !existing.isDone()) return false;
-        if (activePendingCount() >= maxPending) return false;
-        CompletableFuture<PlannerResult> future = CompletableFuture.supplyAsync(
-                () -> planSurface(workerUuid, generation, snapshot), executor)
-                .exceptionally(error -> failed(workerUuid, generation, false, NavigationFailure.UNKNOWN));
-        pending.put(workerUuid, future);
-        return true;
+        if (!tryAcquirePlannerSlot()) return false;
+        try {
+            CompletableFuture<PlannerResult> future = CompletableFuture.supplyAsync(
+                    () -> planSurface(workerUuid, generation, snapshot), executor)
+                    .exceptionally(error -> failed(workerUuid, generation, false, NavigationFailure.UNKNOWN))
+                    .whenComplete((result, error) -> releasePlannerSlot());
+            pending.put(workerUuid, future);
+            return true;
+        } catch (RuntimeException error) {
+            releasePlannerSlot();
+            return false;
+        }
     }
 
     public boolean requestEscape(String workerUuid, long generation, EscapeSnapshot snapshot) {
@@ -94,12 +124,18 @@ public final class WorkerPlannerService {
         if (workerUuid == null || snapshot == null || executor == null || executor.isShutdown()) return false;
         CompletableFuture<PlannerResult> existing = pending.get(workerUuid);
         if (existing != null && !existing.isDone()) return false;
-        if (activePendingCount() >= maxPending) return false;
-        CompletableFuture<PlannerResult> future = CompletableFuture.supplyAsync(
-                () -> planEscape(workerUuid, generation, snapshot), executor)
-                .exceptionally(error -> failed(workerUuid, generation, true, NavigationFailure.UNKNOWN));
-        pending.put(workerUuid, future);
-        return true;
+        if (!tryAcquirePlannerSlot()) return false;
+        try {
+            CompletableFuture<PlannerResult> future = CompletableFuture.supplyAsync(
+                    () -> planEscape(workerUuid, generation, snapshot), executor)
+                    .exceptionally(error -> failed(workerUuid, generation, true, NavigationFailure.UNKNOWN))
+                    .whenComplete((result, error) -> releasePlannerSlot());
+            pending.put(workerUuid, future);
+            return true;
+        } catch (RuntimeException error) {
+            releasePlannerSlot();
+            return false;
+        }
     }
 
     /** Polls one completed result without blocking the server tick. */
@@ -420,4 +456,5 @@ public final class WorkerPlannerService {
 
     private record Node(int index, double score) { }
 }
+
 

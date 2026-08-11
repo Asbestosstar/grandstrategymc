@@ -26,3 +26,4 @@ public class ProductionOrder {
     public void addCompleted(int amount) { completed = Math.min(getRequested(), Math.max(0, completed + Math.max(0, amount))); }
     public boolean isComplete() { return getRemaining() <= 0; }
 }
+

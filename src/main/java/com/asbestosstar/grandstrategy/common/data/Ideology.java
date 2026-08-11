@@ -59,3 +59,4 @@ public class Ideology {
     public Map<String, Double> getReligionCompatibility() { return religionCompatibility == null ? Map.of() : Map.copyOf(religionCompatibility); }
     public boolean isNonAligned() { return nonAligned; }
 }
+

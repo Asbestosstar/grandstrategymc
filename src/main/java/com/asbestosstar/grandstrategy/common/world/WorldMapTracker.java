@@ -201,8 +201,12 @@ public final class WorldMapTracker {
 
     private boolean discoverAroundVillagers(ServerLevel overworld) {
         boolean changed = false;
-        for (PhysicalVillagerSystem.VillagerMapMarker marker
-                : PhysicalVillagerSystem.getInstance().snapshotMapMarkers()) {
+        // Large settlements frequently have dozens of workers in the same chunk.
+        // Discover once per occupied centre chunk instead of rechecking the same 5x5
+        // neighbourhood for every individual person.
+        Set<Long> visitedCentres = new HashSet<>();
+        for (PhysicalVillagerSystem.VillagerDiscoveryMarker marker
+                : PhysicalVillagerSystem.getInstance().snapshotDiscoveryMarkers()) {
             if (marker == null) continue;
             if (!projectionOriginSet) {
                 projectionOriginBlockX = alignToChunkCentre(marker.blockX());
@@ -210,6 +214,9 @@ public final class WorldMapTracker {
                 projectionOriginSet = true;
                 changed = true;
             }
+            int chunkX = Math.floorDiv(marker.blockX(), CHUNK_SIZE);
+            int chunkZ = Math.floorDiv(marker.blockZ(), CHUNK_SIZE);
+            if (!visitedCentres.add(chunkKey(chunkX, chunkZ))) continue;
             changed |= discoverLoadedChunksAround(
                     overworld, marker.blockX(), marker.blockZ(), VILLAGER_DISCOVERY_RADIUS_CHUNKS);
         }
@@ -650,6 +657,7 @@ public final class WorldMapTracker {
         List<MapTile> tiles = new ArrayList<>();
     }
 }
+
 
 
 

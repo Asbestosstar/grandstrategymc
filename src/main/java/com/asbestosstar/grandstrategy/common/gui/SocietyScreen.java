@@ -16,3 +16,4 @@ public final class SocietyScreen extends StrategyScreen {
     private static java.util.List<Map.Entry<String,Double>> sorted(Map<String,Double> map){return map.entrySet().stream().sorted(Map.Entry.<String,Double>comparingByValue(Comparator.reverseOrder())).toList();}
     @Override protected StrategyScreen recreate(){return new SocietyScreen(getParentScreen());}
 }
+

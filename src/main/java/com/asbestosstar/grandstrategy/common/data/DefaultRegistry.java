@@ -214,18 +214,28 @@ public final class DefaultRegistry {
     }
 
     private static void registerTechnologiesAndIndustry() {
-        // Factory types.
+        // Factory types. Optional-mod integration is expressed only with registry ids;
+        // no class from the providing mod is referenced by common code.
         DataManager.getFactoryTypes().put("wooden_factory", new FactoryType(
                 "wooden_factory", "Wooden Factory", "Flammable early workshop with crafting only.",
                 List.of("CRAFTING"), List.of(), List.of("minecraft:crafting_table"), true));
         DataManager.getFactoryTypes().put("smelting_factory", new FactoryType(
-                "smelting_factory", "Smelting Factory", "Stone workshop with crafting and furnace processing.",
+                "smelting_factory", "Smelting Factory", "Stone workshop with crafting and ordinary furnace processing.",
                 List.of("CRAFTING", "SMELTING"), List.of("smelting"), List.of("minecraft:furnace"), false));
+        DataManager.getFactoryTypes().put("blast_factory", new FactoryType(
+                "blast_factory", "Blast Factory",
+                "High-temperature works with a dedicated blast furnace for recipes that require blasting.",
+                List.of("CRAFTING", "SMELTING", "BLASTING"), List.of("blasting"),
+                List.of("minecraft:blast_furnace"), false));
         DataManager.getFactoryTypes().put("steel_factory", new FactoryType(
-                "steel_factory", "Steel Factory", "Advanced metal-working factory enabled only when a steel item exists.",
-                List.of("CRAFTING", "SMELTING", "STEEL"), List.of("steelworking"), List.of(), false));
+                "steel_factory", "Steel Factory",
+                "Optional steel-working complex. It exists only when Dr. Enough Forging's steel registry ids exist.",
+                List.of("CRAFTING", "SMELTING", "BLASTING", "STEEL"), List.of("steelworking"),
+                List.of("drenough_forging:steel_ingot"), false));
 
-        // Technology tree. Research time is real-time baseline for one productive researcher.
+        // Technology tree. Optional technologies can sit in the middle of a progression:
+        // ResearchSystem treats a prerequisite whose technology is absent from the
+        // current mod set as bypassed, so vanilla-only worlds never get stuck.
         putTechnology(tech("basic_crafting", "Basic Crafting", "Organised workshop crafting.", -10000, -5000, 45,
                 List.of(), List.of("minecraft:crafting_table"), List.of(), List.of("wooden_factory"), List.of(),
                 Map.of("*", "WOOD"), 0, 0, 0, 0));
@@ -235,11 +245,29 @@ public final class DefaultRegistry {
         putTechnology(tech("smelting", "Smelting", "Purpose-built furnaces for ore and fuel processing.", -3500, -2500, 150,
                 List.of("basic_crafting"), List.of("minecraft:furnace"), List.of(), List.of("smelting_factory"),
                 List.of("charcoal"), Map.of(), 0, 0, 0, 0));
+
         putTechnology(tech("ironworking", "Ironworking", "Reliable production and use of iron tools.", -1200, 500, 220,
-                List.of("smelting", "stone_tools"), List.of("minecraft:iron_ingot"), List.of(), List.of(), List.of(),
-                Map.of("*", "IRON"), 0, 0, 0, 0));
+                List.of("smelting", "stone_tools"), List.of("minecraft:iron_ingot"), List.of(),
+                List.of(), List.of(), Map.of("*", "IRON"), 0, 0, 0, 0));
+
+        putTechnology(tech("blasting", "Blast Processing",
+                "Dedicated blast furnaces support high-temperature metal and ceramic processing.", 500, 1450, 260,
+                List.of("ironworking"), List.of("minecraft:blast_furnace"), List.of(),
+                List.of("blast_factory"), List.of(), Map.of(), 0, 0, 0, 0));
+
+        // This is intentionally the exact id exposed by the uploaded forging mod.
+        // With the mod installed it is a real tier between iron and diamond. Without
+        // it, this technology and its factory/recipes are hidden and progression skips it.
+        putTechnology(tech("steelworking", "Steelworking",
+                "Blast-produced steel and forged steel tools between iron and diamond.",
+                800, 1650, 340,
+                List.of("ironworking", "blasting"), List.of("drenough_forging:steel_ingot"), List.of(),
+                List.of("steel_factory"),
+                List.of("drenough_coke", "drenough_steel_ingot"),
+                Map.of("*", "STEEL"), -1, 0, 0, 0));
+
         putTechnology(tech("advanced_mining", "Advanced Mining", "High-hardness tools and systematic deep extraction.", 1200, 1750, 300,
-                List.of("ironworking"), List.of("minecraft:diamond"), List.of(), List.of(), List.of(),
+                List.of("ironworking", "steelworking"), List.of("minecraft:diamond"), List.of(), List.of(), List.of(),
                 Map.of("MINER", "DIAMOND", "LUMBERJACK", "DIAMOND", "FARMER", "DIAMOND", "SOLDIER", "DIAMOND"), 0, 0, 0, 0));
         putTechnology(tech("printing_press", "Printing Press", "Cheap replication of written knowledge.", 1450, 1750, 260,
                 List.of("ironworking"), List.of("minecraft:paper"), List.of(), List.of(), List.of(), Map.of(), -2, -1, -2, 0));
@@ -255,28 +283,36 @@ public final class DefaultRegistry {
                 List.of("smelting", "scientific_method"), List.of(), List.of(), List.of(), List.of(), Map.of(), -3, -1, -2, 0));
         putTechnology(tech("darwinism", "Darwinism", "Evolution by natural selection reshapes biological understanding.", 1859, 2000, 380,
                 List.of("scientific_method"), List.of(), List.of(), List.of(), List.of(), Map.of(), -22, -8, -5, 0));
-        putTechnology(tech("steelworking", "Steelworking", "Industrial steel production and steel tooling.", 1850, 2000, 420,
-                List.of("industrialisation", "ironworking"), List.of(),
-                List.of("create:steel_ingot", "mekanism:ingot_steel", "immersiveengineering:ingot_steel", "modern_industrialization:steel_ingot"),
-                List.of("steel_factory"), List.of(), Map.of(), -2, 0, 0, 0));
 
-        // Player queueable factory products. The physical worker currently handles
-        // these built-ins directly; JSON/mod integrations can add definitions and UI
-        // availability without forcing nonexistent-item technologies into the tree.
+        // Player queueable factory products.
+        List<String> craftFactories = List.of("wooden_factory", "smelting_factory", "blast_factory", "steel_factory");
+        List<String> hotFactories = List.of("smelting_factory", "blast_factory", "steel_factory");
+
         recipe("chest", "Chest", "minecraft:chest", 1, Map.of("minecraft:oak_planks", 8),
-                List.of("wooden_factory", "smelting_factory", "steel_factory"), List.of("basic_crafting"), "CRAFTING");
+                craftFactories, List.of("basic_crafting"), "CRAFTING");
         recipe("bread", "Bread", "minecraft:bread", 1, Map.of("minecraft:wheat", 3),
-                List.of("wooden_factory", "smelting_factory", "steel_factory"), List.of("basic_crafting"), "CRAFTING");
+                craftFactories, List.of("basic_crafting"), "CRAFTING");
         recipe("torch", "Torches", "minecraft:torch", 4, Map.of("minecraft:coal", 1, "minecraft:oak_planks", 1),
-                List.of("wooden_factory", "smelting_factory", "steel_factory"), List.of("basic_crafting"), "CRAFTING");
+                craftFactories, List.of("basic_crafting"), "CRAFTING");
         recipe("wooden_pickaxe", "Wooden Pickaxe", "minecraft:wooden_pickaxe", 1, Map.of("minecraft:oak_planks", 4),
-                List.of("wooden_factory", "smelting_factory", "steel_factory"), List.of("basic_crafting"), "CRAFTING");
+                craftFactories, List.of("basic_crafting"), "CRAFTING");
         recipe("stone_pickaxe", "Stone Pickaxe", "minecraft:stone_pickaxe", 1, Map.of("minecraft:cobblestone", 3, "minecraft:oak_planks", 1),
-                List.of("wooden_factory", "smelting_factory", "steel_factory"), List.of("stone_tools"), "CRAFTING");
+                craftFactories, List.of("stone_tools"), "CRAFTING");
         recipe("iron_pickaxe", "Iron Pickaxe", "minecraft:iron_pickaxe", 1, Map.of("minecraft:iron_ingot", 3, "minecraft:oak_planks", 1),
-                List.of("smelting_factory", "steel_factory"), List.of("ironworking"), "CRAFTING");
+                hotFactories, List.of("ironworking"), "CRAFTING");
         recipe("charcoal", "Charcoal", "minecraft:charcoal", 1, Map.of("minecraft:oak_log", 4),
-                List.of("smelting_factory", "steel_factory"), List.of("smelting"), "SMELTING");
+                hotFactories, List.of("smelting"), "SMELTING");
+
+        // Optional Dr. Enough Forging integration. Every ingredient/output is named by
+        // registry id and recipeAvailable() hides these definitions when the mod is absent.
+        // The GS steel-ingot recipe is an industrial abstraction of the mod's coke/pig-iron
+        // chain so automated workers have a closed production path to the real steel item.
+        recipe("drenough_coke", "Coke", "drenough_forging:coke", 1,
+                Map.of("minecraft:coal", 1),
+                List.of("blast_factory", "steel_factory"), List.of("steelworking"), "BLASTING");
+        recipe("drenough_steel_ingot", "Steel Ingot", "drenough_forging:steel_ingot", 1,
+                Map.of("minecraft:iron_ingot", 1, "minecraft:coal", 1),
+                List.of("blast_factory", "steel_factory"), List.of("steelworking"), "BLASTING");
     }
 
     private static Technology tech(String id, String name, String description,
@@ -564,6 +600,7 @@ public final class DefaultRegistry {
         DataManager.getEvents().put(event.getId(), event);
     }
 }
+
 
 
 

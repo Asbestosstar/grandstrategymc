@@ -72,6 +72,16 @@ public final class ResearchSystem {
     public static boolean prerequisitesMet(Civilisation civilisation, Technology technology) {
         if (civilisation == null || technology == null) return false;
         for (String prerequisite : technology.getPrerequisites()) {
+            Technology prerequisiteTechnology = DataManager.getTechnologies().get(prerequisite);
+            // Optional registry-backed technologies are allowed to sit directly in
+            // the main progression. If their providing mod is absent, the prerequisite
+            // itself does not exist in this mod set and is therefore bypassed. This is
+            // what lets IRON -> STEEL -> DIAMOND collapse cleanly to IRON -> DIAMOND
+            // on a vanilla-only installation.
+            if (prerequisiteTechnology != null
+                    && !technologyExistsInCurrentModSet(prerequisiteTechnology)) {
+                continue;
+            }
             if (!civilisation.hasTechnology(prerequisite)) return false;
         }
         return true;
@@ -296,3 +306,4 @@ public final class ResearchSystem {
         }
     }
 }
+

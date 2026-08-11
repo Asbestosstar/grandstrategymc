@@ -381,3 +381,4 @@ public final class SocietySystem {
         return year < 0 ? Math.abs(year) + " BCE" : year + " CE";
     }
 }
+
