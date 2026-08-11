@@ -6,13 +6,17 @@
 
     <groupId>com.asbestosstar</groupId>
     <artifactId>grandstrategymc</artifactId>
-    <version>0.1-SNAPSHOT</version>
+    <version>0.1</version>
 
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <minecraft.version>26.1.2</minecraft.version>
+
+        <!-- Mixin configuration advertised through META-INF/MANIFEST.MF for Forge/ModLauncher. -->
+        <mixin.config>grandstrategy.mixins.json</mixin.config>
+        <maven.jar.plugin.version>3.5.1</maven.jar.plugin.version>
     </properties>
 
 
@@ -223,7 +227,26 @@
     </dependencies>
 
 
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>${maven.jar.plugin.version}</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <MixinConfigs>${mixin.config}</MixinConfigs>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
 </project>
+
 
 
 
