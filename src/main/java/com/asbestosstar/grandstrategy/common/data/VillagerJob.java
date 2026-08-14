@@ -8,16 +8,26 @@ package com.asbestosstar.grandstrategy.common.data;
  * villager that job and its appropriate physical tool.
  */
 public enum VillagerJob {
-	FARMER("Farming"), LUMBERJACK("Lumber"), MINER("Mining"), FACTORY_BUILDER("Factory construction"),
-	ROAD_BUILDER("Road construction"), RESEARCHER("Research"), ADMINISTRATOR("Administration"), SOLDIER("Soldiers");
+    FARMER("Farming"),
+    LUMBERJACK("Lumber"),
+    MINER("Mining"),
+    FACTORY_BUILDER("Factory construction"),
+    ROAD_BUILDER("Road construction"),
+    RESEARCHER("Research"),
+    ADMINISTRATOR("Administration"),
+    SOLDIER("Soldiers");
 
-	private final String displayName;
+    private final String displayName;
 
-	VillagerJob(String displayName) {
-		this.displayName = displayName;
-	}
+    VillagerJob(String displayName) {
+        this.displayName = displayName;
+    }
 
-	public String getDisplayName() {
-		return displayName;
-	}
+    public String getDisplayName() {
+        return displayName;
+    }
 }
+
+
+
+
