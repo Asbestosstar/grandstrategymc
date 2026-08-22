@@ -16,6 +16,9 @@ public class GrandStrategyEvent {
     private List<String> civilisationIds = new ArrayList<>();
     private double weight = 1.0;
     private List<EventOption> options = new ArrayList<>();
+    /** Optional temporary/permanent research modifiers from events. */
+    private double researchSpeedBonus;
+    private java.util.Map<String, Double> technologyResearchBonuses = new java.util.LinkedHashMap<>();
 
     public GrandStrategyEvent() {
     }
@@ -38,6 +41,9 @@ public class GrandStrategyEvent {
         this.civilisationIds = civilisationIds == null ? new ArrayList<>() : new ArrayList<>(civilisationIds);
         this.options = options == null ? new ArrayList<>() : new ArrayList<>(options);
     }
+
+    public double getResearchSpeedBonus() { return researchSpeedBonus; }
+    public java.util.Map<String, Double> getTechnologyResearchBonuses() { return java.util.Map.copyOf(technologyResearchBonuses); }
 
     public boolean canTrigger(Civilisation civilisation, long year) {
         if (civilisation == null || !civilisation.isActive()) return false;

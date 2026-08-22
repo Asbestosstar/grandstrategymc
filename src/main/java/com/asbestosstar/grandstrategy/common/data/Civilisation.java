@@ -129,6 +129,11 @@ public class Civilisation {
     private double populationGrowthAccumulator;
     private double researchPoints;
 
+    /** General and technology-specific research modifiers from civilisation traits and events. */
+    private double researchSpeedModifier = 1.0;
+    private Map<String, Double> technologyResearchBonuses = new LinkedHashMap<>();
+
+
     // Physical army control. AUTO lets server-side soldiers seek wartime objectives;
     // MANUAL makes them move toward a map-issued Overworld X/Z order.
     private String soldierControlMode = "AUTO";
@@ -173,7 +178,7 @@ public class Civilisation {
         if (defaultCityNames == null) defaultCityNames = new ArrayList<>();
         if (completedTechnologyIds == null) completedTechnologyIds = new ArrayList<>();
         if (productionQueue == null) productionQueue = new ArrayList<>();
-        if (resources == null) resources = new LinkedHashMap<>();
+        if (resources == null) resources = new LinkedHashMap<>();\n        if (technologyResearchBonuses == null) technologyResearchBonuses = new LinkedHashMap<>();
         if (villagerJobs == null) villagerJobs = new LinkedHashMap<>();
         if (nationalSpiritIds == null) nationalSpiritIds = new ArrayList<>();
         if (diplomaticRelations == null) diplomaticRelations = new HashMap<>();
@@ -1251,6 +1256,11 @@ public class Civilisation {
         defaultCityNames = names == null ? new ArrayList<>() : new ArrayList<>(names.stream().filter(name -> name != null && !name.isBlank()).toList());
         nextDefaultCityNameIndex = Math.min(nextDefaultCityNameIndex, defaultCityNames.size());
     }
+    public synchronized double getResearchSpeedModifier() { return researchSpeedModifier; }
+    public synchronized void addResearchSpeedModifier(double amount) { researchSpeedModifier = Math.max(0.1, researchSpeedModifier + amount); }
+    public synchronized double getTechnologyResearchBonus(String id) { return technologyResearchBonuses.getOrDefault(id, 0.0); }
+    public synchronized void addTechnologyResearchBonus(String id, double amount) { if (id != null) technologyResearchBonuses.put(id, getTechnologyResearchBonus(id) + amount); }
+
     public synchronized String nextDefaultCityName() {
         if (defaultCityNames == null || defaultCityNames.isEmpty()) return name;
         String chosen = defaultCityNames.get(Math.floorMod(nextDefaultCityNameIndex, defaultCityNames.size()));

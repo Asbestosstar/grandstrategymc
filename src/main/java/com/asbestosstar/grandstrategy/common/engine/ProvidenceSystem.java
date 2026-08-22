@@ -114,7 +114,7 @@ public final class ProvidenceSystem {
                 WorldMapTracker.MapTile cityTile = chooseNeutralCityTile(additions, cell[0], cell[1]);
                 if (cityTile == null) continue;
                 String cityName = "Uncolonised City " + cell[0] + "," + cell[1];
-                City city = new City(id + "_city", cityName,
+                City city = new City(id + "_city", civilisation.nextDefaultCityName(),
                         cityTile.centreBlockX(), cityTile.centreBlockZ(), null, false, false);
                 List<Long> chunks = additions.stream()
                         .map(tile -> WorldMapTracker.chunkKey(tile.chunkX(), tile.chunkZ()))
@@ -137,7 +137,7 @@ public final class ProvidenceSystem {
                         int[] cell = parseGridProvidenceId(id);
                         WorldMapTracker.MapTile cityTile = chooseNeutralCityTile(additions, cell[0], cell[1]);
                         if (cityTile != null) {
-                            city = new City(id + "_city", "Uncolonised City " + cell[0] + "," + cell[1],
+                            city = new City(id + "_city", civilisation.nextDefaultCityName(),
                                     cityTile.centreBlockX(), cityTile.centreBlockZ(), providence.getOwnerId(), false, false);
                         }
                     }

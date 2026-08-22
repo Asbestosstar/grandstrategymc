@@ -77,9 +77,20 @@ public final class DefaultRegistry {
                 List.of("Clio's Office", "Archive", "Systems Annex", "North Laboratory", "Observatory"));
         Civilisation clio = DataManager.getCivilisations().get("cliosoffice");
         if (clio != null) clio.setSnapIdeologyId("technocracy");
+        applyHistoricalResearchModifiers();
     }
 
-    private static void registerCivilisation(String id, String name, String leaderId,
+
+    private static void applyHistoricalResearchModifiers() {
+        // National specialities. These are additive so random events and diplomacy can stack.
+        Civilisation russia = DataManager.getCivilisations().get("russia");
+        if (russia != null) russia.addTechnologyResearchBonus("special_military_operations", 0.35);
+        Civilisation rome = DataManager.getCivilisations().get("rome");
+        if (rome != null) rome.addTechnologyResearchBonus("greek_fire", 0.25);
+        Civilisation egypt = DataManager.getCivilisations().get("egypt");
+        if (egypt != null) egypt.addTechnologyResearchBonus("advanced_mining", 0.10);
+    }
+\n    private static void registerCivilisation(String id, String name, String leaderId,
                                               String ideology, String religion, long startYear,
                                               int mapXPercent, int mapYPercent, int borderColourArgb,
                                               double populationModifier, List<String> defaultCityNames) {
@@ -289,6 +300,25 @@ public final class DefaultRegistry {
                 List.of("industrialisation"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0, 0, 0, 0));
         putTechnology(tech("darwinism", "Darwinism", "Evolution by natural selection reshapes biological understanding.", 1859, 2000, 380,
                 List.of("scientific_method"), List.of(), List.of(), List.of(), List.of(), Map.of(), -22, -8, -5, 0));
+
+        // Expanded branching technology tree. These intentionally have multiple routes so countries
+        // are not forced through one universal line.
+        putTechnology(tech("horse_archery", "Horse Archery", "Mounted ranged warfare traditions.", -800, 1200, 260,
+                List.of("stone_tools"), List.of(), List.of(), List.of(), List.of(), Map.of("SOLDIER", "IRON"), 0,0,0,0));
+        putTechnology(tech("professional_armies", "Professional Armies", "Permanent military institutions.", 1400, 1900, 300,
+                List.of("ironworking"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("gunpowder", "Gunpowder", "Explosive weapons and firearms.", 900, 1700, 330,
+                List.of("blasting"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("steam_power", "Steam Power", "Mechanical power from steam engines.", 1760, 1950, 380,
+                List.of("industrialisation"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("electricity", "Electricity", "Electrical generation and distribution.", 1870, 2050, 420,
+                List.of("scientific_method", "industrialisation"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("computing", "Computing", "Digital calculation and automation.", 1940, 2100, 500,
+                List.of("electricity"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("rocketry", "Rocketry", "Space launch and missile technology.", 1945, 2200, 600,
+                List.of("computing"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
+        putTechnology(tech("greek_fire", "Greek Fire", "Naval incendiary weapons and siege chemistry.", 650, 1300, 250,
+                List.of("blasting"), List.of(), List.of(), List.of(), List.of(), Map.of(), 0,0,0,0));
 
         // Player queueable factory products.
         List<String> craftFactories = List.of("wooden_factory", "smelting_factory", "blast_factory", "steel_factory");

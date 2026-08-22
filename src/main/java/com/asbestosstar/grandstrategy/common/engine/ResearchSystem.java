@@ -147,8 +147,8 @@ public final class ResearchSystem {
                                           long currentYear) {
         if (civilisation == null || technology == null) return Double.POSITIVE_INFINITY;
         int researchers = Math.max(0, civilisation.getJobCount(VillagerJob.RESEARCHER));
-        double agreementMultiplier = researchAgreementMultiplier(civilisation);
-        double speedMultiplier = (1.0 + researchers * RESEARCHER_SPEED_BONUS) * agreementMultiplier;
+        double agreementMultiplier = researchAgreementMultiplier(civilisation);\n        double nationalBonus = civilisation.getResearchSpeedModifier() * (1.0 + civilisation.getTechnologyResearchBonus(activeId));
+        double speedMultiplier = (1.0 + researchers * RESEARCHER_SPEED_BONUS) * agreementMultiplier * nationalBonus;
         return technology.getBaseResearchSeconds()
                 * researchDurationModifier(civilisation, technology, currentYear)
                 / speedMultiplier;
@@ -185,10 +185,10 @@ public final class ResearchSystem {
         }
 
         int researchers = Math.max(0, civilisation.getJobCount(VillagerJob.RESEARCHER));
-        double agreementMultiplier = researchAgreementMultiplier(civilisation);
+        double agreementMultiplier = researchAgreementMultiplier(civilisation);\n        double nationalBonus = civilisation.getResearchSpeedModifier() * (1.0 + civilisation.getTechnologyResearchBonus(activeId));
         double generated = BASE_RESEARCH_POINTS_PER_SECOND
                 * (1.0 + researchers * RESEARCHER_SPEED_BONUS)
-                * agreementMultiplier;
+                * agreementMultiplier * nationalBonus;
 
         // Focuses/events may award banked research points. Those are a bonus on top of
         // the guaranteed time-based rate, not the only source of research progression.
